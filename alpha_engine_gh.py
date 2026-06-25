@@ -151,9 +151,88 @@ async def check_solana_contract(session, addr):
 
     return result
 
-# ─── Scoring ────────────────────────────────────────────────────
-def score_token(profile, pairs, chain_data=None):
+# ─── Narrative Detector ───────────────────────────────────────
+NARRATIVES = {
+    "ai_agent": ["ai","agent","llm","gpt","neural","intelligence","bot","chat","autonomous","compute","inference"],
+    "meme": ["meme","doge","pepe","wojak","chad","based","wagmi","diamond","hands","moon","wen","ser","fren","coin","coin"],
+    "gaming": ["game","gaming","play","rpg","mmo","nft game","metaverse","pixel","p2e","earn"],
+    "defi": ["defi","swap","lend","borrow","yield","stake","farm","liquid","staking","vault","pool"],
+    "depin": ["depin","physical","iot","sensor","network","infrastructure","node","mining"],
+    "rwa": ["rwa","real world","asset","tokenized","treasury","bond","fund"],
+    "social": ["social","content","creator","stream","fan","community","dao"],
+    "privacy": ["privacy","zero knowledge","zk","encrypt","anonymous","secure"],
+}
+
+def detect_narrative(desc):
+    """Detect token narrative from description"""
+    if not desc: return "unknown", []
+    desc_lower = desc.lower()
+    found = []
+    for category, keywords in NARRATIVES.items():
+        for kw in keywords:
+            if kw in desc_lower:
+                found.append(category)
+                break
+    if not found:
+        # Generic check
+        if len(desc) > 100:
+            return "utility", ["project"]
+        return "unknown", []
+    
+    # Pick the most specific narrative
+    priority = ["ai_agent","depin","rwa","gaming","defi","privacy","social","meme"]
+    for p in priority:
+        if p in found:
+            return p.replace("_"," ").upper(), found
+    return found[0].replace("_"," ").upper(), found
+
+# ─── Deployer Wallet Finder ───────────────────────────────────
+async def find_deployer_wallet(session, addr):
+    """Find the actual deployer wallet from first transaction"""
+    try:
+        # Get first transaction of the token mint
+        async with session.post(SOLANA_RPC, json={"jsonrpc":"2.0","id":1,"method":"getSignaturesForAddress",
+            "params":[addr,{"limit":1}]}, timeout=aiohttp.ClientTimeout(total=5)) as r:
+            if r.status==200:
+                sigs=(await r.json()).get("result",[])
+                if sigs:
+                    first_tx=sigs[-1].get("signature","")  # Last in list = oldest
+                    if first_tx:
+                        async with session.post(SOLANA_RPC, json={"jsonrpc":"2.0","id":1,
+                            "method":"getTransaction","params":[first_tx,{"encoding":"jsonParsed","maxSupportedTransactionVersion":0}]},
+                            timeout=aiohttp.ClientTimeout(total=5)) as tr:
+                            if tr.status==200:
+                                tx=await tr.json()
+                                accounts=tx.get("result",{}).get("transaction",{}).get("message",{}).get("accountKeys",[])
+                                if accounts:
+                                    return accounts[0].get("pubkey","")
+    except: pass
+    return None
+
+# ─── Smart Wallet Check ───────────────────────────────────────
+KNOWN_SMART_WALLETS={
+    # Known profitable traders (shortened for privacy, real addrs would be full)
+    # Will grow over time as we discover more
+}
+
+async def check_smart_wallets(session, addr):
+    """Check if known smart wallets hold this token"""
+    try:
+        async with session.post(SOLANA_RPC, json={"jsonrpc":"2.0","id":1,"method":"getTokenLargestAccounts",
+            "params":[addr]}, timeout=aiohttp.ClientTimeout(total=5)) as r:
+            if r.status==200:
+                accounts=(await r.json()).get("result",{}).get("value",[])
+                top_holders=[a.get("address","") for a in accounts[:10]]
+                # Check if any known smart wallet is in the top holders
+                matches=[w for w in KNOWN_SMART_WALLETS if w in top_holders]
+                if matches:
+                    return matches
+    except: pass
+    return []
+
+def score_token(profile, pairs, chain_data=None, narrative="", deployer_wallet="", smart_wallets=None):
     s={"score":0,"reasons":[],"details":{}}
+    smart_wallets=smart_wallets or []
     links=profile.get("links",[])
     if any(l.get("type")=="twitter" for l in links): s["score"]+=15; s["reasons"].append("twitter")
     if any(l.get("type")=="telegram" for l in links): s["score"]+=15; s["reasons"].append("telegram")
@@ -251,6 +330,19 @@ def score_token(profile, pairs, chain_data=None):
         s["details"]["top10_pct"]=top10
     
     s["score"]=max(0,min(100,s["score"]))
+    # Narrative bonus
+    if narrative and narrative != "unknown":
+        s["details"]["narrative"] = narrative
+        s["reasons"].append(f"narasi:{narrative[:6]}")
+    # Deployer wallet
+    if deployer_wallet:
+        s["details"]["deployer_wallet"] = deployer_wallet[:8]+"..."+deployer_wallet[-4:]
+    # Smart wallets
+    if smart_wallets:
+        s["details"]["smart_wallets"] = smart_wallets
+        for sw in smart_wallets[:2]:
+            s["reasons"].append(f"smart_wallet:{sw[:6]}...")
+        s["score"] += 20
     return s
 
 async def main():
@@ -297,8 +389,27 @@ async def main():
                         out.append(f"     Bundle: 🚨 DETECTED! Top10: {hp}% Holder: {br}")
                     else:
                         out.append(f"     Mint:{ma} Top10:{hp}% {br}")
+                
+                # Narrative detection
+                desc=p.get("description","") or ""
+                narrative, _ = detect_narrative(desc)
+                
+                # Deployer wallet lookup
+                deployer_wallet = await find_deployer_wallet(session, addr)
+                if deployer_wallet:
+                    out.append(f"     Deployer: {deployer_wallet[:8]}...{deployer_wallet[-4:]}")
+                
+                # Smart wallet check
+                smart_wallets = await check_smart_wallets(session, addr)
+                if smart_wallets:
+                    out.append(f"     💎 Smart Wallet detected!")
+            else:
+                desc=p.get("description","") or ""
+                narrative, _ = detect_narrative(desc)
+                deployer_wallet = None
+                smart_wallets = []
             
-            result=score_token(p,pairs,chain_data)
+            result=score_token(p,pairs,chain_data,narrative,deployer_wallet,smart_wallets)
             result["addr"]=addr; result["chain"]=chain; result["symbol"]=symbol
             scored.append(result)
             dep_s=result["details"].get("dep_score",0)
@@ -341,6 +452,12 @@ async def main():
             out.append(f"    {dex} D:{dep_b}({dep_s2}) {dep_r}")
             # Insider pro details
             pro_line=[]
+            narasi=s["details"].get("narrative","")
+            d_wallet=s["details"].get("deployer_wallet","")
+            s_wallets=s["details"].get("smart_wallets",[])
+            if narasi: pro_line.append(f"📖{narasi}")
+            if d_wallet: pro_line.append(f"👤{d_wallet}")
+            if s_wallets: pro_line.append(f"💎SmartWallet!")
             if br: pro_line.append(f"Holder:{br}({tp}%)")
             if ma and ma!="?": pro_line.append(f"Mint:{ma}")
             if chain=="solana": pro_line.append(f"Freeze:{fa}")
@@ -394,6 +511,13 @@ async def main():
                 )
                 if br:
                     msg+=f"Holder: {br} ({tp}%) | Mint: {ma}\n"
+                # Narrative + deployer + smart wallet
+                narasi=s["details"].get("narrative","")
+                d_wallet=s["details"].get("deployer_wallet","")
+                s_wallets=s["details"].get("smart_wallets",[])
+                if narasi: msg+=f"📖 Narasi: {narasi}\n"
+                if d_wallet: msg+=f"👤 Deployer: {d_wallet}\n"
+                if s_wallets: msg+=f"💎 Smart Wallet: {', '.join(s_wallets[:2])}\n"
                 msg+=f"DEX: {dex} | {dep_r}\n"
                 if anomaly: msg+=f"{anomaly}\n"
                 if chain=="solana":
