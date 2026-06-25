@@ -357,22 +357,49 @@ async def main():
         async with aiohttp.ClientSession() as tg:
             for s in alerts:
                 sym,chain,addr=s["symbol"],s["chain"],s["addr"]
+                score=s["score"]
                 price=s["details"].get("price",0); liq=s["details"].get("liq",0)
-                reasons=", ".join(s["reasons"][:3])
+                reasons=", ".join(s["reasons"][:4])
                 dep_s2=s["details"].get("dep_score",0)
+                dep_b=s["details"].get("dep_badge","")
                 dep_r=s["details"].get("dep_reason","")
                 br=s["details"].get("bundle_risk","")
                 ma=s["details"].get("mint_auth","?")
-                emoji="PRO" if dep_s2>=80 else "OK" if dep_s2>=60 else "BOND"
-                safety=""
-                if "RENOUNCED" in str(ma): safety="🛡️"
-                elif ma: safety="⚠️"
+                fa=s["details"].get("freeze_auth","?")
+                tp=s["details"].get("top10_pct","?")
+                vol_l=s["details"].get("vol_liq","")
+                age=s["details"].get("age","")
+                dex=s["details"].get("dex","?")
+                bp=s["details"].get("buy_pct","")
                 
-                msg=f"Alpha: {sym} ({s['score']}/100 {emoji}{safety})\n"
-                msg+=f"${liq:,.0f} liq | ${price:.8f}\n{reasons} | {dep_r}\n"
-                if br: msg+=f"Holder: {br} | Mint: {ma}\n"
-                msg+=f"https://dexscreener.com/{chain}/{addr}"
-                if chain=="solana": msg+=f"\nhttps://jup.ag/swap/{addr}-USDC"
+                # Badges
+                dep_emoji="👑PRO" if dep_s2>=80 else "👍OK" if dep_s2>=60 else "⏳BOND"
+                safe_emoji="🛡️Safe" if "RENOUNCED" in str(ma) else "⚠️Active" if ma else ""
+                anomaly=""
+                if bp:
+                    if bp>80: anomaly="🔥Accumulasi"
+                    elif bp>65: anomaly="📈Buy>"
+                    elif bp<30: anomaly="🚨Dumping"
+                
+                price_s=f"${price:.8f}" if price and price<1 else f"${price:.4f}" if price else "?"
+                liq_s=f"${liq:,.0f}" if liq else "?"
+                age_s=f"{age}h" if age else "?"
+                vol_s=f"Vol/Liq {vol_l}x" if vol_l else ""
+                
+                msg=(
+                    f"🚀 {sym} | Score {score}/100 | {dep_emoji} | {safe_emoji}\n"
+                    f"Chain: {chain} | Liq: {liq_s} | Age: {age_s}\n"
+                    f"Price: {price_s} {vol_s}\n"
+                    f"Signal: {reasons}\n"
+                )
+                if br:
+                    msg+=f"Holder: {br} ({tp}%) | Mint: {ma}\n"
+                msg+=f"DEX: {dex} | {dep_r}\n"
+                if anomaly: msg+=f"{anomaly}\n"
+                if chain=="solana":
+                    msg+=f"🟢 Buy: https://jup.ag/swap/{addr}-USDC\n"
+                msg+=f"🔗 Dex: https://dexscreener.com/{chain}/{addr}"
+                
                 async with tg.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
                                     json={"chat_id":TG_CHAT_ID,"text":msg}) as resp:
                     await resp.read()
